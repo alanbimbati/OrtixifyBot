@@ -2406,6 +2406,7 @@ def handle_sub_callbacks(call: types.CallbackQuery) -> None:
             render_subs_page(call.message.chat.id, call.from_user.id, page, _get_msg_id(call.message))
             
     except Exception as e:
+        print(f"Errore nel callback delle iscrizioni: {e}")
         try: bot.answer_callback_query(call.id, "Errore interno.")
         except: pass
 
@@ -3151,8 +3152,10 @@ def poll_subscriptions():
 
 def _subscribers(channel_url: str) -> list[tuple[int, str]]:
     # Whoever already started the new bot gets the news from there: from both it would arrive twice.
+    # Someone who never started this bot has no chat with it: the download would end in "chat not found".
     return [(u, p) for u, p in storage.get_subscribers(DB_PATH, channel_url)
-            if not (HANDOFF_DB and storage.is_known_user(HANDOFF_DB, u))]
+            if storage.is_known_user(DB_PATH, u)
+            and not (HANDOFF_DB and storage.is_known_user(HANDOFF_DB, u))]
 
 
 def notify_subscribers(channel_url: str, video_url: str, channel_title: Optional[str] = None):
