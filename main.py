@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 import time
 import html
@@ -55,10 +56,29 @@ def _clear_downloads() -> None:
 _clear_downloads()
 
 
+class _YdlLogger:
+    # An upcoming live or premiere is not an error (it is postponed), but yt-dlp would print one every retry.
+    def __init__(self, quiet: bool):
+        self.quiet = quiet
+
+    def debug(self, msg: str) -> None:
+        if not self.quiet:
+            print(msg)
+
+    def warning(self, msg: str) -> None:
+        print(f"WARNING: {msg}", file=sys.stderr)
+
+    def error(self, msg: str) -> None:
+        if not _UPCOMING_RE.search(msg):
+            print(msg, file=sys.stderr)
+
+
 def _ydl(opts: dict) -> yt_dlp.YoutubeDL:
     # Read on every call: cookies expire and get replaced without restarting the bot.
     if COOKIES_FILE and os.path.isfile(COOKIES_FILE):
         opts = {**opts, "cookiefile": COOKIES_FILE}
+    if "logger" not in opts:
+        opts = {**opts, "logger": _YdlLogger(bool(opts.get("quiet")))}
     return yt_dlp.YoutubeDL(opts)
 
 
