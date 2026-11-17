@@ -2825,7 +2825,12 @@ def _process_download(task: DownloadTask) -> None:
         if not info_preview:
             # yt-dlp returns nothing at all for a post without media, such as a text-only t.me post.
             raise yt_dlp.utils.DownloadError("No video could be found in this link")
-        if task.from_subscription and info_preview.get("live_status") in ("is_live", "is_upcoming", "post_live"):
+        live_status = info_preview.get("live_status")
+        if task.from_subscription and live_status in ("is_live", "is_upcoming", "post_live"):
+            _postpone(task)
+            return
+        # A live that just ended downloads as an empty file until YouTube has processed it.
+        if live_status == "post_live" and not in_group:
             _postpone(task)
             return
 
@@ -3024,7 +3029,8 @@ def _process_download(task: DownloadTask) -> None:
             return
         if task.article_tried and in_group and _no_video(url, e):
             return
-        _log_error("subscription" if task.from_subscription else "download", url, e, message.chat.type)
+        if not _UPCOMING_RE.search(str(e)):
+            _log_error("subscription" if task.from_subscription else "download", url, e, message.chat.type)
         msg_id = _get_msg_id(message)
         text = f"Errore: {str(e).removeprefix('ERROR: ')}"
         if "confirm you" in str(e) and "not a bot" in str(e):
