@@ -425,20 +425,8 @@ def _bitcoin_terms_in(info: dict) -> list[str]:
     return sorted(found)
 
 
-def _publish_to_channel(from_chat_id, msg_ids: list[int], sticker_file_id: Optional[str] = None,
-                        target: Optional[str] = None) -> bool:
+def _publish_to_channel(from_chat_id, msg_ids: list[int], target: Optional[str] = None) -> bool:
     target = target or BITCOIN_CHANNEL
-    # The BitcoinPodcast sticker is that channel's separator: other chats get the content alone.
-    if target == BITCOIN_CHANNEL:
-        try:
-            if not sticker_file_id:
-                sticker_set = bot.get_sticker_set("BitcoinPodcast")
-                sticker_file_id = sticker_set.stickers[0].file_id if sticker_set.stickers else None
-            if sticker_file_id:
-                bot.send_sticker(target, sticker_file_id)
-        except Exception:
-            pass
-
     published = True
     for m_id in msg_ids:
         try:
@@ -1731,7 +1719,7 @@ def handle_ad_free_offer(message: types.Message) -> None:
 
 
 CHAT_MEDIA_LABELS = {
-    "sticker": "🏷 Sticker", "thumb": "🖼 Anteprima", "video": "🎬 Video", "audio": "🎵 Audio", "articles": "📰 Articoli",
+    "thumb": "🖼 Anteprima", "video": "🎬 Video", "audio": "🎵 Audio", "articles": "📰 Articoli",
 }
 
 
@@ -1952,7 +1940,7 @@ HELP_TEXT = (
     "/unsub link del canale: togli un'iscrizione\n\n"
     "⚙️ /impostazioni\n"
     "La lingua dell'audio (originale, italiano, inglese, spagnolo o francese, se il video ha il doppiaggio) "
-    "e cosa ricevere: sticker, anteprima, video, audio, articoli.\n\n"
+    "e cosa ricevere: anteprima, video, audio, articoli.\n\n"
     "👥 Gruppi e canali\n"
     "Aggiungimi come amministratore: scarico ogni link pubblicato, senza domande e senza messaggi di errore. "
     "Gli amministratori scelgono lingua e cosa inviare con /impostazioni.\n\n"
@@ -2932,18 +2920,6 @@ def _process_download(task: DownloadTask) -> None:
         if task.from_subscription and storage.has_downloaded(DB_PATH, uid, yt_id):
             return
 
-        # Send the sticker to the user
-        sticker_file_id = None
-        sticker_msg = None
-        try:
-            sticker_set = bot.get_sticker_set("BitcoinPodcast")
-            if sticker_set.stickers:
-                sticker_file_id = sticker_set.stickers[0].file_id
-                if show["sticker"]:
-                    sticker_msg = bot.send_sticker(message.chat.id, sticker_file_id, message_thread_id=topic)
-        except Exception:
-            pass
-
         # The language belongs to the chat: in a group it is the group's, not the poster's.
         dub_lang = _dub_lang_for(info_preview, storage.get_audio_lang(DB_PATH, message.chat.id))
         # A dub is a different file: in the cache it cannot take the original's place.
@@ -3128,8 +3104,8 @@ def _process_download(task: DownloadTask) -> None:
         if sent_ids:
             if task.publish_to:
                 # The private copy only served to send it there: seen once, in the channel.
-                if _publish_to_channel(message.chat.id, sent_ids, sticker_file_id, target=task.publish_to):
-                    for m_id in sent_ids + ([sticker_msg.message_id] if sticker_msg else []):
+                if _publish_to_channel(message.chat.id, sent_ids, target=task.publish_to):
+                    for m_id in sent_ids:
                         try:
                             bot.delete_message(message.chat.id, m_id)
                         except Exception as e:
@@ -3140,7 +3116,7 @@ def _process_download(task: DownloadTask) -> None:
                 if terms:
                     if uid == ADMIN_USER_ID:
                         # L'admin è chi approverebbe: chiederglielo sarebbe solo un passaggio in più.
-                        _publish_to_channel(message.chat.id, sent_ids, sticker_file_id)
+                        _publish_to_channel(message.chat.id, sent_ids)
                     else:
                         _propose_channel_publication(message, title, terms, sent_ids)
 
