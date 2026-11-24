@@ -1621,10 +1621,12 @@ def _send_thumbnail(chat_id: int, thumb_url: str, caption: str, yt_id: str, titl
         raise last_exc
 
 
-def _rich_bundle_html(title: str, note: str, source_url: str, kinds: list[str], for_chat: Any) -> str:
-    tags = {"photo": '<img src="tg://photo?id=photo">', "video": '<video src="tg://video?id=video"></video>',
-            "audio": '<audio src="tg://audio?id=audio"></audio>'}
-    parts = [f"<p><b>{html.escape(title)}</b>{html.escape(note)}</p>"] + [tags[k] for k in kinds]
+def _rich_bundle_html(title: str, source_url: str, kinds: list[str], for_chat: Any) -> str:
+    # Video and audio stay folded: the message opens on the cover, each player one tap away.
+    tags = {"photo": '<img src="tg://photo?id=photo">',
+            "video": '<details><summary>🎬 Video</summary><video src="tg://video?id=video"></video></details>',
+            "audio": '<details><summary>🎵 Audio</summary><audio src="tg://audio?id=audio"></audio></details>'}
+    parts = [f"<p><b>{html.escape(title)}</b></p>"] + [tags[k] for k in kinds]
     if source_url:
         parts.append(f'<p><a href="{html.escape(source_url, quote=True)}">Fonte</a></p>')
     for chunk in _sponsor_tail(for_chat).split("\n\n"):
@@ -1633,7 +1635,7 @@ def _rich_bundle_html(title: str, note: str, source_url: str, kinds: list[str], 
     return "".join(parts)
 
 
-def _send_rich_bundle(chat_id: int, *, title: str, source_url: str, note: str = "",
+def _send_rich_bundle(chat_id: int, *, title: str, source_url: str,
                       photo: Optional[dict] = None, video: Optional[dict] = None,
                       audio: Optional[dict] = None) -> Optional[dict]:
     """Preview, video and audio in one rich message, so the sponsor block appears once.
@@ -1667,7 +1669,7 @@ def _send_rich_bundle(chat_id: int, *, title: str, source_url: str, note: str = 
             if item.get("thumbnail"):
                 item["thumbnail"] = by_path(item["thumbnail"], f"{kind}_thumb.jpg")
             media.append({"id": kind, "media": {"type": kind, **item}})
-        rich = {"html": _rich_bundle_html(title, note, source_url, list(items), chat_id), "media": media}
+        rich = {"html": _rich_bundle_html(title, source_url, list(items), chat_id), "media": media}
         return _send_with_retry(_tg_post, "sendRichMessage",
                                 {"chat_id": str(chat_id), "rich_message": json.dumps(rich)}, timeout_s=60 * 20)
     except Exception as e:
@@ -1679,7 +1681,10 @@ def _send_rich_bundle(chat_id: int, *, title: str, source_url: str, note: str = 
 
 def _rich_file_ids(result: dict) -> dict:
     ids = {}
-    for block in (result.get("rich_message") or {}).get("blocks") or []:
+    blocks = list((result.get("rich_message") or {}).get("blocks") or [])
+    while blocks:
+        block = blocks.pop()
+        blocks += block.get("blocks") or []
         obj = block.get(block.get("type"))
         if isinstance(obj, list) and obj:
             obj = obj[-1]
@@ -2952,11 +2957,10 @@ def _process_download(task: DownloadTask) -> None:
         # Without the preview the title would only be in the file name: it goes into the caption.
         video_label = "🎬 Video" if show["thumb"] else f"🎬 {title}"
         audio_label = "🎵 Audio" if show["thumb"] else f"🎵 {title}"
-        cache_tag = "" if in_group else " (cache)"
 
         if cached and cached.get("video_file_id") and cached.get("audio_file_id"):
             msg_rich = _send_rich_bundle(
-                message.chat.id, title=title, source_url=source_url, note=cache_tag,
+                message.chat.id, title=title, source_url=source_url,
                 photo={"media": cached["thumb_file_id"]} if show["thumb"] and cached.get("thumb_file_id") else None,
                 video={"media": cached["video_file_id"]} if mode in ["V", "B"] else None,
                 audio={"media": cached["audio_file_id"]} if mode in ["A", "B"] else None,
@@ -2976,7 +2980,7 @@ def _process_download(task: DownloadTask) -> None:
                             bot.send_video,
                             message.chat.id,
                             cached["video_file_id"],
-                            caption=_media_caption(video_label + cache_tag, for_chat=message.chat.id, source_url=source_url),
+                            caption=_media_caption(video_label, for_chat=message.chat.id, source_url=source_url),
                             parse_mode="HTML",
                             message_thread_id=topic,
                         )
@@ -2985,7 +2989,7 @@ def _process_download(task: DownloadTask) -> None:
                             bot.send_document,
                             message.chat.id,
                             cached["video_file_id"],
-                            caption=_media_caption(video_label + cache_tag, for_chat=message.chat.id, source_url=source_url),
+                            caption=_media_caption(video_label, for_chat=message.chat.id, source_url=source_url),
                             parse_mode="HTML",
                             message_thread_id=topic,
                         )
@@ -2994,7 +2998,7 @@ def _process_download(task: DownloadTask) -> None:
                         bot.send_audio,
                         message.chat.id,
                         cached["audio_file_id"],
-                        caption=_media_caption(audio_label + cache_tag, for_chat=message.chat.id, source_url=source_url),
+                        caption=_media_caption(audio_label, for_chat=message.chat.id, source_url=source_url),
                         parse_mode="HTML",
                         message_thread_id=topic,
                     )
