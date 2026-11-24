@@ -1719,7 +1719,7 @@ def handle_ad_free_offer(message: types.Message) -> None:
 
 
 CHAT_MEDIA_LABELS = {
-    "thumb": "🖼 Anteprima", "video": "🎬 Video", "audio": "🎵 Audio", "articles": "📰 Articoli",
+    "thumb": "🖼 Anteprima", "articles": "📰 Articoli",
 }
 
 
@@ -1940,7 +1940,7 @@ HELP_TEXT = (
     "/unsub link del canale: togli un'iscrizione\n\n"
     "⚙️ /impostazioni\n"
     "La lingua dell'audio (originale, italiano, inglese, spagnolo o francese, se il video ha il doppiaggio) "
-    "e cosa ricevere: anteprima, video, audio, articoli.\n\n"
+    "e cosa ricevere oltre a video e audio: anteprima, articoli.\n\n"
     "👥 Gruppi e canali\n"
     "Aggiungimi come amministratore: scarico ogni link pubblicato, senza domande e senza messaggi di errore. "
     "Gli amministratori scelgono lingua e cosa inviare con /impostazioni.\n\n"
@@ -2616,13 +2616,6 @@ def _has_full_cache(url: str, user_id: int) -> bool:
     return bool(cached and cached.get("video_file_id") and cached.get("audio_file_id"))
 
 
-def _media_mode(chat_id: int) -> Optional[str]:
-    show = storage.get_chat_settings(DB_PATH, chat_id)
-    if show["video"] and show["audio"]:
-        return "B"
-    return "V" if show["video"] else "A" if show["audio"] else None
-
-
 _telegraph_guard = threading.Lock()
 
 
@@ -2787,24 +2780,18 @@ def _route_link(message: types.Message, url: str) -> None:
         bot.reply_to(message, "Gli articoli sono spenti in ⚙️ Impostazioni: riaccendili per riceverli puliti.")
 
 
-def _mode_for(chat_id: int, url: str) -> Optional[str]:
+def _mode_for(url: str) -> str:
     # Suno is music: its video is only the cover art standing still.
-    if re.search(r"(?://|\.)suno\.(?:com|ai)/", url):
-        return "A"
-    return _media_mode(chat_id)
+    return "A" if re.search(r"(?://|\.)suno\.(?:com|ai)/", url) else "B"
 
 
 def _route_video(message: types.Message, url: str, article_tried: bool = False) -> None:
     # In groups everything is downloaded without asking: whoever posts a link wants it there, not in private.
-    mode = _mode_for(message.chat.id, url)
+    mode = _mode_for(url)
     if message.chat.type != "private":
-        if mode:
-            download_queue.put(DownloadTask(message, url, mode, article_tried=article_tried))
+        download_queue.put(DownloadTask(message, url, mode, article_tried=article_tried))
         return
-    if not mode:
-        bot.reply_to(message, "Hai spento sia il video sia l'audio in ⚙️ Impostazioni: riaccendine almeno uno.")
-        return
-    # Already cached: send everything right away, without asking the format or waiting in the queue.
+    # Already cached: send everything right away, without waiting in the queue.
     if _has_full_cache(url, message.chat.id):
         threading.Thread(target=_process_download, args=(DownloadTask(message, url, mode),), daemon=True).start()
         return
@@ -2815,23 +2802,10 @@ def _route_video(message: types.Message, url: str, article_tried: bool = False) 
             bot.reply_to(message, _append_sponsor("Hai raggiunto il limite di 3 download all'ora. Riprova più tardi.", limit=TEXT_LIMIT, for_chat=message.chat.id))
             return
 
-    # With only one of video and audio turned on there is nothing to choose.
-    if mode != "B":
-        task = DownloadTask(message, url, mode)
-        bot.reply_to(message, _append_sponsor(f"⏳ Richiesta accodata. Posizione stimata: {_queue_position(task)}...",
-                                              limit=TEXT_LIMIT, for_chat=message.chat.id))
-        download_queue.put(task)
-        return
-
-    # Invia scelte via InlineKeyboardMarkup
-    url_id = storage.save_url_cache(DB_PATH, url)
-    kb = types.InlineKeyboardMarkup(row_width=3)
-    kb.add(
-        types.InlineKeyboardButton("🎵 Solo Audio", callback_data=f"dl:A:{url_id}"),
-        types.InlineKeyboardButton("🎬 Solo Video", callback_data=f"dl:V:{url_id}"),
-        types.InlineKeyboardButton("📽️ Entrambi", callback_data=f"dl:B:{url_id}")
-    )
-    bot.send_message(message.chat.id, _append_sponsor("Scegli un formato:", limit=TEXT_LIMIT, for_chat=message.chat.id), reply_markup=kb, reply_to_message_id=_get_msg_id(message))
+    task = DownloadTask(message, url, mode)
+    bot.reply_to(message, _append_sponsor(f"⏳ Richiesta accodata. Posizione stimata: {_queue_position(task)}...",
+                                          limit=TEXT_LIMIT, for_chat=message.chat.id))
+    download_queue.put(task)
 
 @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("dl:"))
 def handle_dl_choice(call: types.CallbackQuery) -> None:
@@ -3295,10 +3269,8 @@ def notify_subscribers(channel_url: str, video_url: str, channel_title: Optional
                 "chat": {"id": user_id, "type": "private"},
                 "text": video_url,
             })
-            mode = _media_mode(user_id)
-            if mode:
-                download_queue.put(DownloadTask(fake_message, video_url, mode=mode, publish_to=publish_to,
-                                                from_subscription=True))
+            download_queue.put(DownloadTask(fake_message, video_url, mode=_mode_for(video_url), publish_to=publish_to,
+                                            from_subscription=True))
         except Exception as e:
             print(f"Errore nella notifica all'utente {user_id}: {e}")
 
