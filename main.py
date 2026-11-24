@@ -3,6 +3,7 @@ import sys
 import re
 import time
 import html
+import json
 import mimetypes
 import shutil
 import subprocess
@@ -1487,6 +1488,21 @@ def _prepare_thumbnail(thumb_url: str, yt_id: str) -> Optional[str]:
     return None
 
 
+def _full_thumbnail(yt_id: str) -> Optional[str]:
+    # The downloaded cover is often a webp under a .jpg name: by path it must already be a real jpeg.
+    raw_path = os.path.join(DOWNLOAD_DIR, f"{yt_id}_thumb.jpg")
+    full_path = os.path.join(DOWNLOAD_DIR, f"{yt_id}_thumb_full.jpg")
+    if not os.path.exists(raw_path):
+        return None
+    try:
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", raw_path, "-q:v", "3", full_path],
+                       check=True, timeout=60)
+        return full_path if os.path.getsize(full_path) > 0 else None
+    except Exception as e:
+        print(f"Copertina non convertita: {e}")
+        return None
+
+
 def _send_video_or_document(
     chat_id: int,
     file_path: str,
@@ -1603,6 +1619,73 @@ def _send_thumbnail(chat_id: int, thumb_url: str, caption: str, yt_id: str, titl
             time.sleep(min(10, attempt * 2))
     if last_exc:
         raise last_exc
+
+
+def _rich_bundle_html(title: str, note: str, source_url: str, kinds: list[str], for_chat: Any) -> str:
+    tags = {"photo": '<img src="tg://photo?id=photo">', "video": '<video src="tg://video?id=video"></video>',
+            "audio": '<audio src="tg://audio?id=audio"></audio>'}
+    parts = [f"<p><b>{html.escape(title)}</b>{html.escape(note)}</p>"] + [tags[k] for k in kinds]
+    if source_url:
+        parts.append(f'<p><a href="{html.escape(source_url, quote=True)}">Fonte</a></p>')
+    for chunk in _sponsor_tail(for_chat).split("\n\n"):
+        if chunk:
+            parts.append("<p>" + html.escape(chunk).replace("\n", "<br>") + "</p>")
+    return "".join(parts)
+
+
+def _send_rich_bundle(chat_id: int, *, title: str, source_url: str, note: str = "",
+                      photo: Optional[dict] = None, video: Optional[dict] = None,
+                      audio: Optional[dict] = None) -> Optional[dict]:
+    """Preview, video and audio in one rich message, so the sponsor block appears once.
+
+    Each item is an InputMedia without its type: "media" is a file_id; "path", "filename" and a
+    "thumbnail" path stand for a local file. None means: send them as separate messages instead.
+    """
+    items = {k: v for k, v in (("photo", photo), ("video", video), ("audio", audio)) if v}
+    if len(items) < 2:
+        return None
+    # Local files only go by path (file://): without the local server they would need a multipart upload.
+    if not LOCAL_FILES and any("path" in v for v in items.values()):
+        return None
+
+    link_dir = tempfile.mkdtemp(prefix="rich_", dir=DOWNLOAD_DIR)
+    os.chmod(link_dir, 0o755)
+
+    def by_path(path: str, name: str) -> str:
+        # The server names the file after the path: the link gives it the name the phone proposes when saving.
+        linked = os.path.join(os.path.abspath(link_dir), name)
+        os.link(path, linked)
+        return f"file://{linked}"
+
+    try:
+        media = []
+        for kind, item in items.items():
+            item = {k: v for k, v in item.items() if v is not None}
+            path, filename = item.pop("path", None), item.pop("filename", None)
+            if path:
+                item["media"] = by_path(path, filename or os.path.basename(path))
+            if item.get("thumbnail"):
+                item["thumbnail"] = by_path(item["thumbnail"], f"{kind}_thumb.jpg")
+            media.append({"id": kind, "media": {"type": kind, **item}})
+        rich = {"html": _rich_bundle_html(title, note, source_url, list(items), chat_id), "media": media}
+        return _send_with_retry(_tg_post, "sendRichMessage",
+                                {"chat_id": str(chat_id), "rich_message": json.dumps(rich)}, timeout_s=60 * 20)
+    except Exception as e:
+        print(f"Messaggio unico non inviato, passo ai messaggi separati: {e}")
+        return None
+    finally:
+        shutil.rmtree(link_dir, ignore_errors=True)
+
+
+def _rich_file_ids(result: dict) -> dict:
+    ids = {}
+    for block in (result.get("rich_message") or {}).get("blocks") or []:
+        obj = block.get(block.get("type"))
+        if isinstance(obj, list) and obj:
+            obj = obj[-1]
+        if isinstance(obj, dict) and obj.get("file_id"):
+            ids[block["type"]] = obj["file_id"]
+    return ids
 
 
 def main_menu_keyboard(user_id: Optional[int] = None):
@@ -2865,48 +2948,56 @@ def _process_download(task: DownloadTask) -> None:
         msg_photo = None
         msg_video = None
         msg_audio = None
+        msg_rich = None
         # Without the preview the title would only be in the file name: it goes into the caption.
         video_label = "🎬 Video" if show["thumb"] else f"🎬 {title}"
         audio_label = "🎵 Audio" if show["thumb"] else f"🎵 {title}"
         cache_tag = "" if in_group else " (cache)"
 
         if cached and cached.get("video_file_id") and cached.get("audio_file_id"):
-            if show["thumb"] and cached.get("thumb_file_id"):
-                msg_photo = bot.send_photo(
-                    message.chat.id,
-                    cached["thumb_file_id"],
-                    caption=_media_caption(f"📸 {title}", for_chat=message.chat.id, source_url=source_url),
-                    parse_mode="HTML",
-                    message_thread_id=topic,
-                )
-            if mode in ["V", "B"]:
-                try:
-                    msg_video = _send_with_retry(
-                        bot.send_video,
+            msg_rich = _send_rich_bundle(
+                message.chat.id, title=title, source_url=source_url, note=cache_tag,
+                photo={"media": cached["thumb_file_id"]} if show["thumb"] and cached.get("thumb_file_id") else None,
+                video={"media": cached["video_file_id"]} if mode in ["V", "B"] else None,
+                audio={"media": cached["audio_file_id"]} if mode in ["A", "B"] else None,
+            )
+            if msg_rich is None:
+                if show["thumb"] and cached.get("thumb_file_id"):
+                    msg_photo = bot.send_photo(
                         message.chat.id,
-                        cached["video_file_id"],
-                        caption=_media_caption(video_label + cache_tag, for_chat=message.chat.id, source_url=source_url),
+                        cached["thumb_file_id"],
+                        caption=_media_caption(f"📸 {title}", for_chat=message.chat.id, source_url=source_url),
                         parse_mode="HTML",
                         message_thread_id=topic,
                     )
-                except Exception:
-                    msg_video = _send_with_retry(
-                        bot.send_document,
+                if mode in ["V", "B"]:
+                    try:
+                        msg_video = _send_with_retry(
+                            bot.send_video,
+                            message.chat.id,
+                            cached["video_file_id"],
+                            caption=_media_caption(video_label + cache_tag, for_chat=message.chat.id, source_url=source_url),
+                            parse_mode="HTML",
+                            message_thread_id=topic,
+                        )
+                    except Exception:
+                        msg_video = _send_with_retry(
+                            bot.send_document,
+                            message.chat.id,
+                            cached["video_file_id"],
+                            caption=_media_caption(video_label + cache_tag, for_chat=message.chat.id, source_url=source_url),
+                            parse_mode="HTML",
+                            message_thread_id=topic,
+                        )
+                if mode in ["A", "B"]:
+                    msg_audio = _send_with_retry(
+                        bot.send_audio,
                         message.chat.id,
-                        cached["video_file_id"],
-                        caption=_media_caption(video_label + cache_tag, for_chat=message.chat.id, source_url=source_url),
+                        cached["audio_file_id"],
+                        caption=_media_caption(audio_label + cache_tag, for_chat=message.chat.id, source_url=source_url),
                         parse_mode="HTML",
                         message_thread_id=topic,
                     )
-            if mode in ["A", "B"]:
-                msg_audio = _send_with_retry(
-                    bot.send_audio,
-                    message.chat.id,
-                    cached["audio_file_id"],
-                    caption=_media_caption(audio_label + cache_tag, for_chat=message.chat.id, source_url=source_url),
-                    parse_mode="HTML",
-                    message_thread_id=topic,
-                )
             
             storage.log_download(DB_PATH, uid, yt_id, yt_title=title, chat_id=message.chat.id,
                                  chat_type=message.chat.type, from_cache=True)
@@ -2938,53 +3029,77 @@ def _process_download(task: DownloadTask) -> None:
                 if path:
                     _tag_media(path, title=title, performer=performer or "", source_url=url)
 
-            if show["thumb"]:
-                try:
-                    thumb_result = _send_thumbnail(message.chat.id, thumb_url, f"📸 {title}", yt_id, title, source_url=source_url)
-                    if isinstance(thumb_result, tuple):
-                        msg_photo, thumb_path = thumb_result
-                    else:
-                        msg_photo = thumb_result
-                except Exception as e:
-                    print(f"Invio thumbnail fallito: {e}")
+            stem = _safe_filename(title)
+            photo_jpg = _full_thumbnail(yt_id) if show["thumb"] else None
+            msg_rich = _send_rich_bundle(
+                message.chat.id, title=title, source_url=source_url,
+                photo={"path": photo_jpg} if photo_jpg else None,
+                video={"path": video_path, "filename": f"{stem}{os.path.splitext(video_path)[1] or '.mp4'}",
+                       "thumbnail": small_thumb, "duration": duration, "width": meta.get("width") or None,
+                       "height": meta.get("height") or None, "supports_streaming": True}
+                if video_path and mode in ["V", "B"] else None,
+                audio={"path": audio_path, "filename": f"{stem}{os.path.splitext(audio_path)[1] or '.mp3'}",
+                       "thumbnail": small_thumb, "title": title, "duration": duration,
+                       "performer": performer[:64] if performer else None}
+                if audio_path and mode in ["A", "B"] else None,
+            )
+            if msg_rich is None:
+                if show["thumb"]:
+                    try:
+                        thumb_result = _send_thumbnail(message.chat.id, thumb_url, f"📸 {title}", yt_id, title, source_url=source_url)
+                        if isinstance(thumb_result, tuple):
+                            msg_photo, thumb_path = thumb_result
+                        else:
+                            msg_photo = thumb_result
+                    except Exception as e:
+                        print(f"Invio thumbnail fallito: {e}")
 
-            if video_path and mode in ["V", "B"]:
-                try:
-                    msg_video = _send_video_or_document(
-                        message.chat.id, video_path, video_label,
-                        title=title,
-                        thumb_path=small_thumb,
-                        duration=duration,
-                        width=meta.get("width") or None,
-                        height=meta.get("height") or None,
-                        source_url=source_url,
-                    )
-                except Exception as e:
-                    vsz = os.path.getsize(video_path) if os.path.exists(video_path) else -1
-                    print(f"Invio video fallito (size={vsz}): {e}")
+                if video_path and mode in ["V", "B"]:
+                    try:
+                        msg_video = _send_video_or_document(
+                            message.chat.id, video_path, video_label,
+                            title=title,
+                            thumb_path=small_thumb,
+                            duration=duration,
+                            width=meta.get("width") or None,
+                            height=meta.get("height") or None,
+                            source_url=source_url,
+                        )
+                    except Exception as e:
+                        vsz = os.path.getsize(video_path) if os.path.exists(video_path) else -1
+                        print(f"Invio video fallito (size={vsz}): {e}")
 
-            if audio_path and mode in ["A", "B"]:
-                try:
-                    msg_audio = _send_audio(
-                        message.chat.id, audio_path, audio_label, title,
-                        thumb_path=small_thumb,
-                        duration=duration,
-                        performer=performer,
-                        source_url=source_url,
-                    )
-                except Exception as e:
-                    asz = os.path.getsize(audio_path) if os.path.exists(audio_path) else -1
-                    print(f"Invio audio fallito (size={asz}): {e}")
+                if audio_path and mode in ["A", "B"]:
+                    try:
+                        msg_audio = _send_audio(
+                            message.chat.id, audio_path, audio_label, title,
+                            thumb_path=small_thumb,
+                            duration=duration,
+                            performer=performer,
+                            source_url=source_url,
+                        )
+                    except Exception as e:
+                        asz = os.path.getsize(audio_path) if os.path.exists(audio_path) else -1
+                        print(f"Invio audio fallito (size={asz}): {e}")
 
+            if msg_rich:
+                ids = _rich_file_ids(msg_rich)
+            else:
+                ids = {
+                    "photo": _file_id_from_result(msg_photo, "photo") if msg_photo else "",
+                    "video": (_file_id_from_result(msg_video, "video") or _file_id_from_result(msg_video, "document"))
+                    if msg_video else "",
+                    "audio": _file_id_from_result(msg_audio, "audio") if msg_audio else "",
+                }
             # update cache only if we downloaded BOTH
-            if mode == "B" and msg_video and msg_audio:
+            if mode == "B" and ids.get("video") and ids.get("audio"):
                 storage.upsert_cache(
                     DB_PATH,
                     cache_key,
                     title=title,
-                    thumb_file_id=_file_id_from_result(msg_photo, "photo") if msg_photo else "",
-                    video_file_id=_file_id_from_result(msg_video, "video") or _file_id_from_result(msg_video, "document"),
-                    audio_file_id=_file_id_from_result(msg_audio, "audio"),
+                    thumb_file_id=ids.get("photo", ""),
+                    video_file_id=ids["video"],
+                    audio_file_id=ids["audio"],
                 )
             
             storage.log_download(DB_PATH, uid, yt_id, yt_title=title, chat_id=message.chat.id,
@@ -2996,6 +3111,7 @@ def _process_download(task: DownloadTask) -> None:
                 )
                 
         sent_ids = []
+        if msg_rich: sent_ids.append(msg_rich["message_id"])
         if isinstance(msg_photo, dict) and msg_photo.get("message_id"): sent_ids.append(msg_photo["message_id"])
         elif hasattr(msg_photo, "message_id"): sent_ids.append(msg_photo.message_id)
 
@@ -3055,7 +3171,7 @@ def _process_download(task: DownloadTask) -> None:
         if yt_id:
             _cleanup_partial_downloads(f"{yt_id}_video.")
             _cleanup_partial_downloads(f"{yt_id}_audio.")
-            leftovers = [f"{yt_id}_thumb.jpg", f"{yt_id}_thumb_small.jpg"]
+            leftovers = [f"{yt_id}_thumb.jpg", f"{yt_id}_thumb_small.jpg", f"{yt_id}_thumb_full.jpg"]
             # writethumbnail lascia la copertina dell'audio se EmbedThumbnail non la consuma.
             leftovers += [
                 n for n in os.listdir(DOWNLOAD_DIR)
