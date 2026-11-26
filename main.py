@@ -1627,13 +1627,22 @@ def _send_thumbnail(chat_id: int, thumb_url: str, caption: str, yt_id: str, titl
         raise last_exc
 
 
+DESCRIPTION_MAX = 3000
+
+
 def _rich_bundle_html(title: str, source_url: str, kinds: list[str], for_chat: Any,
-                      source_name: str = "") -> str:
+                      source_name: str = "", description: str = "") -> str:
     # Video and audio stay folded: the message opens on the cover, each player one tap away.
     tags = {"photo": '<img src="tg://photo?id=photo">',
             "video": '<details><summary>🎬 Video</summary><video src="tg://video?id=video"></video></details>',
             "audio": '<details><summary>🎵 Audio</summary><audio src="tg://audio?id=audio"></audio></details>'}
     parts = [f"<p><b>{html.escape(title)}</b></p>"] + [tags[k] for k in kinds]
+    description = description.strip()
+    if description:
+        if len(description) > DESCRIPTION_MAX:
+            description = description[:DESCRIPTION_MAX].rstrip() + "…"
+        body = html.escape(description).replace("\n", "<br>")
+        parts.append(f"<details><summary>📝 Descrizione</summary><p>{body}</p></details>")
     if source_url:
         parts.append(f"<p>{_source_html(source_url, source_name)}</p>")
     for chunk in _sponsor_tail(for_chat).split("\n\n"):
@@ -1643,7 +1652,7 @@ def _rich_bundle_html(title: str, source_url: str, kinds: list[str], for_chat: A
 
 
 def _send_rich_bundle(chat_id: int, *, title: str, source_url: str, source_name: str = "",
-                      photo: Optional[dict] = None, video: Optional[dict] = None,
+                      description: str = "", photo: Optional[dict] = None, video: Optional[dict] = None,
                       audio: Optional[dict] = None) -> Optional[dict]:
     """Preview, video and audio in one rich message, so the sponsor block appears once.
 
@@ -1676,7 +1685,7 @@ def _send_rich_bundle(chat_id: int, *, title: str, source_url: str, source_name:
             if item.get("thumbnail"):
                 item["thumbnail"] = by_path(item["thumbnail"], f"{kind}_thumb.jpg")
             media.append({"id": kind, "media": {"type": kind, **item}})
-        rich = {"html": _rich_bundle_html(title, source_url, list(items), chat_id, source_name), "media": media}
+        rich = {"html": _rich_bundle_html(title, source_url, list(items), chat_id, source_name, description), "media": media}
         return _send_with_retry(_tg_post, "sendRichMessage",
                                 {"chat_id": str(chat_id), "rich_message": json.dumps(rich)}, timeout_s=60 * 20)
     except Exception as e:
@@ -2931,6 +2940,7 @@ def _process_download(task: DownloadTask) -> None:
         if cached and cached.get("video_file_id") and cached.get("audio_file_id"):
             msg_rich = _send_rich_bundle(
                 message.chat.id, title=title, source_url=source_url, source_name=source_name,
+                description=info_preview.get("description") or "",
                 photo={"media": cached["thumb_file_id"]} if show["thumb"] and cached.get("thumb_file_id") else None,
                 video={"media": cached["video_file_id"]} if mode in ["V", "B"] else None,
                 audio={"media": cached["audio_file_id"]} if mode in ["A", "B"] else None,
@@ -3007,6 +3017,7 @@ def _process_download(task: DownloadTask) -> None:
             photo_jpg = _full_thumbnail(yt_id) if show["thumb"] else None
             msg_rich = _send_rich_bundle(
                 message.chat.id, title=title, source_url=source_url, source_name=source_name,
+                description=info_preview.get("description") or "",
                 photo={"path": photo_jpg} if photo_jpg else None,
                 video={"path": video_path, "filename": f"{stem}{os.path.splitext(video_path)[1] or '.mp4'}",
                        "thumbnail": small_thumb, "duration": duration, "width": meta.get("width") or None,
