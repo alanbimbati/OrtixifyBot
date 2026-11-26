@@ -215,14 +215,30 @@ def _with_sponsor_html(text: str, for_chat: Any) -> str:
     return f"{text}\n\n{html.escape(tail, quote=False)}" if tail else text
 
 
+def _hashtag(name: str) -> str:
+    # Telegram hashtags take only letters, digits and _: "Bit Vero" becomes #BitVero.
+    words = re.findall(r"\w+", name or "")
+    tag = "".join(w[:1].upper() + w[1:] for w in words)
+    return f"#{tag}" if tag and not tag.isdigit() else ""
+
+
+def _source_html(source_url: str, source_name: str = "") -> str:
+    if not source_url:
+        return ""
+    tag = _hashtag(source_name)
+    link = f'<a href="{html.escape(source_url, quote=True)}">Fonte</a>'
+    return f"{link} {tag}" if tag else link
+
+
 def _media_caption(text: str, *, for_chat: Optional[int] = None, source_url: str = "",
-                   limit: int = CAPTION_LIMIT) -> str:
+                   source_name: str = "", limit: int = CAPTION_LIMIT) -> str:
     """HTML: the video title can contain < > &, so it is escaped before the link is added."""
-    source = f'<a href="{html.escape(source_url, quote=True)}">Fonte</a>' if source_url else ""
+    source = _source_html(source_url, source_name)
     sponsor = _sponsor_tail(for_chat, limit)
 
     # Telegram's limit counts the visible text, not the tags.
-    tail = ("\n\nFonte" if source else "") + (f"\n\n{sponsor}" if sponsor else "")
+    visible_source = re.sub(r"<[^>]+>", "", source)
+    tail = (f"\n\n{visible_source}" if source else "") + (f"\n\n{sponsor}" if sponsor else "")
     base = (text or "").strip()
     room = limit - len(tail)
     if len(base) > room:
@@ -1502,8 +1518,9 @@ def _send_video_or_document(
     width: Optional[int] = None,
     height: Optional[int] = None,
     source_url: str = "",
+    source_name: str = "",
 ):
-    caption = _media_caption(caption, for_chat=chat_id, source_url=source_url)
+    caption = _media_caption(caption, for_chat=chat_id, source_url=source_url, source_name=source_name)
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File non trovato: {file_path}")
     size = os.path.getsize(file_path)
@@ -1551,8 +1568,9 @@ def _send_audio(
     duration: Optional[int] = None,
     performer: Optional[str] = None,
     source_url: str = "",
+    source_name: str = "",
 ):
-    caption = _media_caption(caption, for_chat=chat_id, source_url=source_url)
+    caption = _media_caption(caption, for_chat=chat_id, source_url=source_url, source_name=source_name)
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File non trovato: {file_path}")
     size = os.path.getsize(file_path)
@@ -1576,8 +1594,8 @@ def _send_audio(
 
 
 def _send_thumbnail(chat_id: int, thumb_url: str, caption: str, yt_id: str, title: str = "",
-                    source_url: str = ""):
-    caption = _media_caption(caption, for_chat=chat_id, source_url=source_url)
+                    source_url: str = "", source_name: str = ""):
+    caption = _media_caption(caption, for_chat=chat_id, source_url=source_url, source_name=source_name)
     # Prova 1: lascia che Telegram scarichi l'URL (più veloce).
     try:
         return _tg_send_photo(chat_id, thumb_url, caption)
@@ -1609,21 +1627,22 @@ def _send_thumbnail(chat_id: int, thumb_url: str, caption: str, yt_id: str, titl
         raise last_exc
 
 
-def _rich_bundle_html(title: str, source_url: str, kinds: list[str], for_chat: Any) -> str:
+def _rich_bundle_html(title: str, source_url: str, kinds: list[str], for_chat: Any,
+                      source_name: str = "") -> str:
     # Video and audio stay folded: the message opens on the cover, each player one tap away.
     tags = {"photo": '<img src="tg://photo?id=photo">',
             "video": '<details><summary>🎬 Video</summary><video src="tg://video?id=video"></video></details>',
             "audio": '<details><summary>🎵 Audio</summary><audio src="tg://audio?id=audio"></audio></details>'}
     parts = [f"<p><b>{html.escape(title)}</b></p>"] + [tags[k] for k in kinds]
     if source_url:
-        parts.append(f'<p><a href="{html.escape(source_url, quote=True)}">Fonte</a></p>')
+        parts.append(f"<p>{_source_html(source_url, source_name)}</p>")
     for chunk in _sponsor_tail(for_chat).split("\n\n"):
         if chunk:
             parts.append("<p>" + html.escape(chunk).replace("\n", "<br>") + "</p>")
     return "".join(parts)
 
 
-def _send_rich_bundle(chat_id: int, *, title: str, source_url: str,
+def _send_rich_bundle(chat_id: int, *, title: str, source_url: str, source_name: str = "",
                       photo: Optional[dict] = None, video: Optional[dict] = None,
                       audio: Optional[dict] = None) -> Optional[dict]:
     """Preview, video and audio in one rich message, so the sponsor block appears once.
@@ -1657,7 +1676,7 @@ def _send_rich_bundle(chat_id: int, *, title: str, source_url: str,
             if item.get("thumbnail"):
                 item["thumbnail"] = by_path(item["thumbnail"], f"{kind}_thumb.jpg")
             media.append({"id": kind, "media": {"type": kind, **item}})
-        rich = {"html": _rich_bundle_html(title, source_url, list(items), chat_id), "media": media}
+        rich = {"html": _rich_bundle_html(title, source_url, list(items), chat_id, source_name), "media": media}
         return _send_with_retry(_tg_post, "sendRichMessage",
                                 {"chat_id": str(chat_id), "rich_message": json.dumps(rich)}, timeout_s=60 * 20)
     except Exception as e:
@@ -2655,7 +2674,7 @@ def _send_tweet(message: types.Message, url: str) -> bool:
     link = tweet.get("url") or url
     head = f'<b>{html.escape(author.get("name") or "", quote=False)}</b> (@{html.escape(author.get("screen_name") or "", quote=False)})'
     text = _with_sponsor_html(
-        f'{head}\n\n{html.escape(tweet.get("text") or "", quote=False)}\n\n<a href="{html.escape(link)}">Fonte</a>',
+        f'{head}\n\n{html.escape(tweet.get("text") or "", quote=False)}\n\n{_source_html(link, author.get("name") or author.get("screen_name") or "")}',
         message.chat.id,
     )
     photos = [m["url"] for m in (tweet.get("media") or {}).get("photos") or [] if m.get("url")][:10]
@@ -2888,6 +2907,7 @@ def _process_download(task: DownloadTask) -> None:
         title = info_preview.get("title") or "Video"
         # webpage_url is the clean link (watch?v=…), without the sharing parameters.
         source_url = info_preview.get("webpage_url") or url
+        source_name = info_preview.get("channel") or info_preview.get("uploader") or ""
         lock = _video_lock(yt_id)
         lock.acquire()
         # The same channel can come from two subscriptions (handle and a video link): once is enough.
@@ -2910,7 +2930,7 @@ def _process_download(task: DownloadTask) -> None:
 
         if cached and cached.get("video_file_id") and cached.get("audio_file_id"):
             msg_rich = _send_rich_bundle(
-                message.chat.id, title=title, source_url=source_url,
+                message.chat.id, title=title, source_url=source_url, source_name=source_name,
                 photo={"media": cached["thumb_file_id"]} if show["thumb"] and cached.get("thumb_file_id") else None,
                 video={"media": cached["video_file_id"]} if mode in ["V", "B"] else None,
                 audio={"media": cached["audio_file_id"]} if mode in ["A", "B"] else None,
@@ -2920,7 +2940,7 @@ def _process_download(task: DownloadTask) -> None:
                     msg_photo = bot.send_photo(
                         message.chat.id,
                         cached["thumb_file_id"],
-                        caption=_media_caption(f"📸 {title}", for_chat=message.chat.id, source_url=source_url),
+                        caption=_media_caption(f"📸 {title}", for_chat=message.chat.id, source_url=source_url, source_name=source_name),
                         parse_mode="HTML",
                         message_thread_id=topic,
                     )
@@ -2930,7 +2950,7 @@ def _process_download(task: DownloadTask) -> None:
                             bot.send_video,
                             message.chat.id,
                             cached["video_file_id"],
-                            caption=_media_caption(video_label, for_chat=message.chat.id, source_url=source_url),
+                            caption=_media_caption(video_label, for_chat=message.chat.id, source_url=source_url, source_name=source_name),
                             parse_mode="HTML",
                             message_thread_id=topic,
                         )
@@ -2939,7 +2959,7 @@ def _process_download(task: DownloadTask) -> None:
                             bot.send_document,
                             message.chat.id,
                             cached["video_file_id"],
-                            caption=_media_caption(video_label, for_chat=message.chat.id, source_url=source_url),
+                            caption=_media_caption(video_label, for_chat=message.chat.id, source_url=source_url, source_name=source_name),
                             parse_mode="HTML",
                             message_thread_id=topic,
                         )
@@ -2948,7 +2968,7 @@ def _process_download(task: DownloadTask) -> None:
                         bot.send_audio,
                         message.chat.id,
                         cached["audio_file_id"],
-                        caption=_media_caption(audio_label, for_chat=message.chat.id, source_url=source_url),
+                        caption=_media_caption(audio_label, for_chat=message.chat.id, source_url=source_url, source_name=source_name),
                         parse_mode="HTML",
                         message_thread_id=topic,
                     )
@@ -2986,7 +3006,7 @@ def _process_download(task: DownloadTask) -> None:
             stem = _safe_filename(title)
             photo_jpg = _full_thumbnail(yt_id) if show["thumb"] else None
             msg_rich = _send_rich_bundle(
-                message.chat.id, title=title, source_url=source_url,
+                message.chat.id, title=title, source_url=source_url, source_name=source_name,
                 photo={"path": photo_jpg} if photo_jpg else None,
                 video={"path": video_path, "filename": f"{stem}{os.path.splitext(video_path)[1] or '.mp4'}",
                        "thumbnail": small_thumb, "duration": duration, "width": meta.get("width") or None,
@@ -3000,7 +3020,7 @@ def _process_download(task: DownloadTask) -> None:
             if msg_rich is None:
                 if show["thumb"]:
                     try:
-                        thumb_result = _send_thumbnail(message.chat.id, thumb_url, f"📸 {title}", yt_id, title, source_url=source_url)
+                        thumb_result = _send_thumbnail(message.chat.id, thumb_url, f"📸 {title}", yt_id, title, source_url=source_url, source_name=source_name)
                         if isinstance(thumb_result, tuple):
                             msg_photo, thumb_path = thumb_result
                         else:
@@ -3018,6 +3038,7 @@ def _process_download(task: DownloadTask) -> None:
                             width=meta.get("width") or None,
                             height=meta.get("height") or None,
                             source_url=source_url,
+                            source_name=source_name,
                         )
                     except Exception as e:
                         vsz = os.path.getsize(video_path) if os.path.exists(video_path) else -1
@@ -3031,6 +3052,7 @@ def _process_download(task: DownloadTask) -> None:
                             duration=duration,
                             performer=performer,
                             source_url=source_url,
+                            source_name=source_name,
                         )
                     except Exception as e:
                         asz = os.path.getsize(audio_path) if os.path.exists(audio_path) else -1
