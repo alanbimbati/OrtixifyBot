@@ -1,4 +1,4 @@
-# YTDownloader Telegram Bot
+# OrtixifyBot Telegram Bot
 
 Questo bot scarica da YouTube e invia in chat:
 - thumbnail (foto)
