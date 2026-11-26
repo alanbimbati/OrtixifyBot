@@ -1,3 +1,19 @@
+x-bot-env: &bot-env
+    BOT_TOKEN: ${BOT_TOKEN}
+    ADMIN_USER_ID: ${ADMIN_USER_ID}
+    ADMIN_CONTACT: ${ADMIN_CONTACT:-}
+    BITCOIN_CHANNEL: ${BITCOIN_CHANNEL:-@BitcoinPodcastTelegram}
+    AD_FREE_PRICE_SATS: ${AD_FREE_PRICE_SATS:-20000}
+    AD_FREE_PAYEE: ${AD_FREE_PAYEE:-@AlanBimbati}
+    API_BASE_URL: http://telegram-bot-api:8081
+    DB_PATH: /data/bot_cache.sqlite3
+    COOKIES_FILE: /data/cookies.txt
+    MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-2146435072}
+    MOVED_TO: ${MOVED_TO:-}
+    HANDOFF_DB: ${HANDOFF_DB:-}
+    DOWNLOAD_DIR: /downloads/ytdownloader
+    LOCAL_FILES: "1"
+
 services:
   telegram-bot-api:
     image: aiogram/telegram-bot-api:latest
@@ -20,26 +36,17 @@ services:
   ytdownloader-bot:
     build: .
     command: ["python", "redirect_bot.py"]
-    restart: unless-stopped
     mem_limit: 160m
     memswap_limit: 160m
     depends_on:
       - telegram-bot-api
-    environment: &bot-env
-      BOT_TOKEN: ${BOT_TOKEN}
-      ADMIN_USER_ID: ${ADMIN_USER_ID}
-      ADMIN_CONTACT: ${ADMIN_CONTACT:-}
-      BITCOIN_CHANNEL: ${BITCOIN_CHANNEL:-@BitcoinPodcastTelegram}
-      AD_FREE_PRICE_SATS: ${AD_FREE_PRICE_SATS:-20000}
-      AD_FREE_PAYEE: ${AD_FREE_PAYEE:-@AlanBimbati}
-      API_BASE_URL: http://telegram-bot-api:8081
-      DB_PATH: /data/bot_cache.sqlite3
-      COOKIES_FILE: /data/cookies.txt
-      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-2146435072}
-      MOVED_TO: ${MOVED_TO:-}
-      HANDOFF_DB: ${HANDOFF_DB:-}
-      DOWNLOAD_DIR: /downloads/ytdownloader
-      LOCAL_FILES: "1"
+    restart: on-failure
+    environment:
+      <<: *bot-env
+      # The old bot says goodbye at these times, then exits for good at SHUTDOWN_AT.
+      NEW_BOT_DB: /data/ortixify.sqlite3
+      FAREWELL_AT: ${FAREWELL_AT:-2026-11-26T10:40:00+01:00,2026-11-29T11:00:00+01:00,2026-12-03T11:00:00+01:00}
+      SHUTDOWN_AT: ${SHUTDOWN_AT:-2026-12-03T12:00:00+01:00}
     volumes:
       - ytdownloader-data:/data
       - ytdownloader-downloads:/downloads/ytdownloader
