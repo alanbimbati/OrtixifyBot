@@ -102,6 +102,7 @@ services:
       NOSTR_NSEC: ${NOSTR_NSEC:-}
       NOSTR_RELAYS: ${NOSTR_RELAYS:-wss://relay.damus.io,wss://nos.lol,wss://relay.primal.net}
       BLOSSOM_SERVER: ${BLOSSOM_SERVER:-https://blossom.primal.net}
+      TELEGRAM_CHANNEL: ${TELEGRAM_CHANNEL:-@AlanBimbatiBlog}
     volumes:
       - ${PUBLISH_HOST_DIR:-/home/dietpi/Pubblica}:/pubblica
       - publisher-data:/data

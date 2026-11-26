@@ -9,9 +9,9 @@ from zoneinfo import ZoneInfo
 from . import config, media, post_file, texts
 from .media import Video
 from .notify import notify
-from .platforms import linkedin, nostr, youtube
+from .platforms import linkedin, nostr, telegram, youtube
 
-ORDER = ["youtube", "shorts", "linkedin", "nostr"]
+ORDER = ["youtube", "shorts", "linkedin", "nostr", "telegram"]
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 _sizes: dict[str, tuple[int, float]] = {}
 _linkedin_warned_day = ""
@@ -51,7 +51,8 @@ def _workdir(folder: str) -> str:
 
 
 AVAILABLE = {"youtube": lambda: youtube.available(), "shorts": lambda: youtube.available(),
-             "linkedin": lambda: linkedin.available(), "nostr": lambda: nostr.available()}
+             "linkedin": lambda: linkedin.available(), "nostr": lambda: nostr.available(),
+             "telegram": lambda: telegram.available()}
 
 
 def _applicable(horizontal: Video | None, vertical: Video | None) -> list[str]:
@@ -59,6 +60,8 @@ def _applicable(horizontal: Video | None, vertical: Video | None) -> list[str]:
     wanted = {
         "youtube": horizontal is not None,
         "shorts": vertical is not None and vertical.duration <= config.SHORTS_MAX_SECONDS,
+        # Opt-in: the channel gets only what the author adds to `piattaforme` by hand.
+        "telegram": False,
     }
     return [p for p in ORDER if wanted.get(p, True)]
 
@@ -95,6 +98,12 @@ def _publish_at(post: dict) -> str:
     if local.timestamp() <= time.time() + 600:
         return ""
     return local.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _due(post: dict) -> bool:
+    # Telegram has no scheduled posts: the channel post waits here until `programma`.
+    when = str(post.get("programma") or "").strip()
+    return not when or datetime.strptime(when, "%Y-%m-%d %H:%M").replace(tzinfo=ZoneInfo(config.TIMEZONE)).timestamp() <= time.time()
 
 
 def _thumbnail_image(folder: str) -> str | None:
@@ -138,6 +147,10 @@ def _publish_one(platform: str, folder: str, post: dict, language: str, done: di
         thumb = media.thumbnail(main, os.path.join(work, "thumb.jpg"))
         upload_path = lambda v: media.shrink(v, os.path.join(work, f"nostr-{'v' if v.vertical else 'h'}.mp4"), config.BLOSSOM_MAX_BYTES)
         return nostr.post(horizontal, vertical, post["nostr"], thumb, upload_path), []
+    if platform == "telegram":
+        p = post.get("telegram") or {}
+        text, follow_up = (p["text"], "") if p.get("text") else telegram.caption(post["shorts"]["title"], post["shorts"]["description"])
+        return telegram.post(vertical or horizontal, text, follow_up), []
     raise ValueError(f"piattaforma sconosciuta: {platform}")
 
 
@@ -145,6 +158,8 @@ def publish(folder: str, post: dict, state: dict, paths: list[str]) -> None:
     name = os.path.basename(folder)
     done = state.setdefault("piattaforme", {})
     pending = [p for p in post.get("piattaforme") or [] if not (done.get(p) or {}).get("url")]
+    waiting = [p for p in pending if p == "telegram" and not _due(post)]
+    pending = [p for p in pending if p not in waiting]
     horizontal, vertical = _pick(paths)
     state["fase"] = "pubblicazione"
     state["tentativo_su_post_salvato_il"] = post_file.post_mtime(folder)
@@ -169,6 +184,12 @@ def publish(folder: str, post: dict, state: dict, paths: list[str]) -> None:
         post_file.write_state(folder, state)
         notify(f"⚠️ {name}: pubblicazione parziale\n" + "\n".join(lines)
                         + "\n\nSalva di nuovo post.yaml per riprovare solo quelle fallite.")
+        return
+    if waiting:
+        state["fase"] = "programmato"
+        post_file.write_state(folder, state)
+        if pending:
+            notify(f"🕒 {name}: {', '.join(waiting)} alle {post['programma']}\n" + "\n".join(lines))
         return
     state["fase"] = "pubblicato"
     post_file.write_state(folder, state)
@@ -196,6 +217,8 @@ def handle(folder: str) -> None:
     # A failure is retried only when the author saves post.yaml again, never in a loop.
     if state.get("fase") in ("errori", "errore", "pubblicazione") and state.get("tentativo_su_post_salvato_il", 0) >= post_file.post_mtime(folder):
         return
+    if state.get("fase") == "programmato" and not _due(post) and state.get("tentativo_su_post_salvato_il", 0) >= post_file.post_mtime(folder):
+        return
     publish(folder, post, state, paths)
 
 
@@ -211,7 +234,7 @@ def _check_linkedin_token() -> None:
 def main() -> None:
     os.makedirs(config.WORK_DIR, exist_ok=True)
     print(f"Watching {config.WATCH_DIR}; platforms: youtube={youtube.available()} linkedin={linkedin.available()} "
-          f"nostr={nostr.available()}")
+          f"nostr={nostr.available()} telegram={telegram.available()}")
     while True:
         _check_linkedin_token()
         for entry in sorted(os.listdir(config.WATCH_DIR)):

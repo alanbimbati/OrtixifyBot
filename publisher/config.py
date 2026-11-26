@@ -37,5 +37,7 @@ NOSTR_RELAYS = [r.strip() for r in _env("NOSTR_RELAYS", "wss://relay.damus.io,ws
 BLOSSOM_SERVER = _env("BLOSSOM_SERVER", "https://blossom.primal.net").rstrip("/")
 BLOSSOM_MAX_BYTES = int(_env("BLOSSOM_MAX_MB", "500")) * 1024 * 1024
 
+TELEGRAM_CHANNEL = _env("TELEGRAM_CHANNEL")
+
 LINKEDIN_MAX_BYTES = 500 * 1024 * 1024
 SHORTS_MAX_SECONDS = 180
