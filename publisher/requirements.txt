@@ -5,3 +5,4 @@ PyYAML
 coincurve
 websockets
 tzdata
+telethon

@@ -1,5 +1,6 @@
 """Publishes a horizontal + vertical video pair dropped in a Syncthing folder, after the author approves Claude's texts."""
 import os
+import re
 import shutil
 import time
 import traceback
@@ -9,9 +10,9 @@ from zoneinfo import ZoneInfo
 from . import config, media, post_file, texts
 from .media import Video
 from .notify import notify
-from .platforms import linkedin, nostr, telegram, youtube
+from .platforms import linkedin, nostr, telegram, telegram_story, youtube
 
-ORDER = ["youtube", "shorts", "linkedin", "nostr", "telegram"]
+ORDER = ["youtube", "shorts", "linkedin", "nostr", "telegram", "storia"]
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 _sizes: dict[str, tuple[int, float]] = {}
 _linkedin_warned_day = ""
@@ -52,7 +53,7 @@ def _workdir(folder: str) -> str:
 
 AVAILABLE = {"youtube": lambda: youtube.available(), "shorts": lambda: youtube.available(),
              "linkedin": lambda: linkedin.available(), "nostr": lambda: nostr.available(),
-             "telegram": lambda: telegram.available()}
+             "telegram": lambda: telegram.available(), "storia": lambda: telegram_story.available()}
 
 
 def _applicable(horizontal: Video | None, vertical: Video | None) -> list[str]:
@@ -62,6 +63,7 @@ def _applicable(horizontal: Video | None, vertical: Video | None) -> list[str]:
         "shorts": vertical is not None and vertical.duration <= config.SHORTS_MAX_SECONDS,
         # Opt-in: the channel gets only what the author adds to `piattaforme` by hand.
         "telegram": False,
+        "storia": False,
     }
     return [p for p in ORDER if wanted.get(p, True)]
 
@@ -101,7 +103,7 @@ def _publish_at(post: dict) -> str:
 
 
 def _due(post: dict) -> bool:
-    # Telegram has no scheduled posts: the channel post waits here until `programma`.
+    # Telegram has no scheduled posts: the channel post and story wait here until `programma`.
     when = str(post.get("programma") or "").strip()
     return not when or datetime.strptime(when, "%Y-%m-%d %H:%M").replace(tzinfo=ZoneInfo(config.TIMEZONE)).timestamp() <= time.time()
 
@@ -151,6 +153,10 @@ def _publish_one(platform: str, folder: str, post: dict, language: str, done: di
         p = post.get("telegram") or {}
         text, follow_up = (p["text"], "") if p.get("text") else telegram.caption(post["shorts"]["title"], post["shorts"]["description"])
         return telegram.post(vertical or horizontal, text, follow_up), []
+    if platform == "storia":
+        p = post.get("storia") or {}
+        caption = p.get("text") or re.sub(r"\s*#shorts\b", "", post["shorts"]["title"], flags=re.I).strip()
+        return telegram_story.post(vertical, caption), []
     raise ValueError(f"piattaforma sconosciuta: {platform}")
 
 
@@ -158,7 +164,7 @@ def publish(folder: str, post: dict, state: dict, paths: list[str]) -> None:
     name = os.path.basename(folder)
     done = state.setdefault("piattaforme", {})
     pending = [p for p in post.get("piattaforme") or [] if not (done.get(p) or {}).get("url")]
-    waiting = [p for p in pending if p == "telegram" and not _due(post)]
+    waiting = [p for p in pending if p in ("telegram", "storia") and not _due(post)]
     pending = [p for p in pending if p not in waiting]
     horizontal, vertical = _pick(paths)
     state["fase"] = "pubblicazione"
