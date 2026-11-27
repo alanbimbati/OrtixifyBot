@@ -1,3 +1,5 @@
+import html
+import json
 import re
 
 import requests
@@ -6,6 +8,8 @@ from .. import config
 from ..media import Video
 
 CAPTION_MAX = 1024
+CHANNEL_URL = "https://t.me/AlanBimbatiBlog"
+YOUTUBE_LINK = re.compile(r"https://(?:youtu\.be/|(?:www\.)?youtube\.com/(?:watch\?v=|shorts/))[\w-]+")
 
 
 def available() -> bool:
@@ -37,18 +41,37 @@ def caption(title: str, description: str) -> tuple[str, str]:
     credits = lines[lines.index("Crediti") + 1:] if "Crediti" in lines else []
     tags = " ".join(t for t in (lines[-1].split() if lines and lines[-1].startswith("#") else []) if t.lower() != "#shorts")
     title = re.sub(r"\s*#shorts\b", "", title, flags=re.I).strip()
-    head, cred = [title, "\n".join(intro).strip()], _credits(credits)
+    head = [f"<b>{html.escape(title)}</b>", html.escape("\n".join(intro).strip())]
+    cred = _credits(credits)
+    cred = f"<i>{html.escape(cred)}</i>" if cred else ""
     text = "\n\n".join(p for p in head + [cred, tags] if p)
     if len(text) <= CAPTION_MAX:
         return text, ""
     return "\n\n".join(p for p in head + [tags] if p)[:CAPTION_MAX], cred[:4000]
 
 
-def post(video: Video, text: str, follow_up: str = "") -> str:
+def with_youtube(text: str, youtube_url: str) -> tuple[str, str]:
+    """The caption with the YouTube link in it, and the link the button opens (the long video when the text names it)."""
+    found = YOUTUBE_LINK.search(text)
+    if found:
+        return text, found.group(0)
+    if not youtube_url:
+        return text, ""
+    return f"{text}\n\n▶️ Video completo su YouTube: {youtube_url}", youtube_url
+
+
+def _buttons(youtube_url: str) -> str:
+    rows = [[{"text": "▶️ Guarda su YouTube", "url": youtube_url}]] if youtube_url else []
+    return json.dumps({"inline_keyboard": rows + [[{"text": "📲 Seguimi sul canale", "url": CHANNEL_URL}]]})
+
+
+def post(video: Video, text: str, follow_up: str = "", youtube_url: str = "") -> str:
+    """`text` is Telegram HTML: bold title, links; a button row opens YouTube and the channel."""
+    text, button_url = with_youtube(text, youtube_url)
     with open(video.path, "rb") as f:
         r = requests.post(f"{config.API_BASE_URL}/bot{config.BOT_TOKEN}/sendVideo", timeout=600, data={
-            "chat_id": config.TELEGRAM_CHANNEL, "caption": text, "width": video.width, "height": video.height,
-            "duration": round(video.duration), "supports_streaming": "true",
+            "chat_id": config.TELEGRAM_CHANNEL, "caption": text, "parse_mode": "HTML", "reply_markup": _buttons(button_url),
+            "width": video.width, "height": video.height, "duration": round(video.duration), "supports_streaming": "true",
         }, files={"video": f})
     body = r.json()
     if not body.get("ok"):
@@ -56,7 +79,7 @@ def post(video: Video, text: str, follow_up: str = "") -> str:
     chat = body["result"]["chat"]
     if follow_up:
         r = requests.post(f"{config.API_BASE_URL}/bot{config.BOT_TOKEN}/sendMessage", timeout=60, data={
-            "chat_id": config.TELEGRAM_CHANNEL, "text": follow_up, "disable_web_page_preview": "true",
+            "chat_id": config.TELEGRAM_CHANNEL, "text": follow_up, "parse_mode": "HTML", "disable_web_page_preview": "true",
             "reply_to_message_id": body["result"]["message_id"],
         })
         if not r.json().get("ok"):

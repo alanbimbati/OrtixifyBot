@@ -152,7 +152,8 @@ def _publish_one(platform: str, folder: str, post: dict, language: str, done: di
     if platform == "telegram":
         p = post.get("telegram") or {}
         text, follow_up = (p["text"], "") if p.get("text") else telegram.caption(post["shorts"]["title"], post["shorts"]["description"])
-        return telegram.post(vertical or horizontal, text, follow_up), []
+        youtube_url = (done.get("youtube") or done.get("shorts") or {}).get("url", "")
+        return telegram.post(vertical or horizontal, text, follow_up, youtube_url), []
     if platform == "storia":
         p = post.get("storia") or {}
         caption = p.get("text") or re.sub(r"\s*#shorts\b", "", post["shorts"]["title"], flags=re.I).strip()
