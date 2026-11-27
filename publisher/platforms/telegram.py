@@ -50,6 +50,23 @@ def caption(title: str, description: str) -> tuple[str, str]:
     return "\n\n".join(p for p in head + [tags] if p)[:CAPTION_MAX], cred[:4000]
 
 
+_LABELLED = re.compile(r"^([^\w\n]*)([^\n:<>]*\w[^\n:<>]*?):\s*(https?://[^\s<]+)[ \t]*$", re.M)
+_BARE = re.compile(r"(?<![\"'>=])(https?://[^\s<]+)")
+
+
+def _label(url: str) -> str:
+    if YOUTUBE_LINK.match(url):
+        return "Guarda su YouTube"
+    host = re.sub(r"^https?://(www\.)?", "", url).split("/")[0]
+    return host
+
+
+def linkify(text: str) -> str:
+    """Never a raw URL in a channel post: «Label: URL» becomes a linked label, any other URL a linked site name."""
+    text = _LABELLED.sub(lambda m: f'{m.group(1)}<a href="{m.group(3)}">{m.group(2).strip()}</a>', text)
+    return _BARE.sub(lambda m: f'<a href="{m.group(1)}">{_label(m.group(1))}</a>', text)
+
+
 def with_youtube(text: str, youtube_url: str) -> tuple[str, str]:
     """The caption with the YouTube link in it, and the link the button opens (the long video when the text names it)."""
     found = YOUTUBE_LINK.search(text)
@@ -57,7 +74,7 @@ def with_youtube(text: str, youtube_url: str) -> tuple[str, str]:
         return text, found.group(0)
     if not youtube_url:
         return text, ""
-    return f"{text}\n\n▶️ Video completo su YouTube: {youtube_url}", youtube_url
+    return f'{text}\n\n▶️ <a href="{youtube_url}">Guarda il video completo su YouTube</a>', youtube_url
 
 
 def _buttons(youtube_url: str) -> str:
@@ -68,6 +85,7 @@ def _buttons(youtube_url: str) -> str:
 def post(video: Video, text: str, follow_up: str = "", youtube_url: str = "") -> str:
     """`text` is Telegram HTML: bold title, links; a button row opens YouTube and the channel."""
     text, button_url = with_youtube(text, youtube_url)
+    text, follow_up = linkify(text), linkify(follow_up)
     with open(video.path, "rb") as f:
         r = requests.post(f"{config.API_BASE_URL}/bot{config.BOT_TOKEN}/sendVideo", timeout=600, data={
             "chat_id": config.TELEGRAM_CHANNEL, "caption": text, "parse_mode": "HTML", "reply_markup": _buttons(button_url),
