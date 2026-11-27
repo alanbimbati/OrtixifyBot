@@ -7,7 +7,7 @@ import traceback
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from . import config, media, post_file, texts
+from . import config, media, post_file, recap, texts
 from .media import Video
 from .notify import notify
 from .platforms import linkedin, nostr, telegram, telegram_story, youtube
@@ -244,6 +244,13 @@ def main() -> None:
           f"nostr={nostr.available()} telegram={telegram.available()}")
     while True:
         _check_linkedin_token()
+        try:
+            link = recap.maybe_post()
+            if link:
+                notify(f"📌 Riepilogo settimanale pubblicato: {link}")
+        except Exception as e:
+            traceback.print_exc()
+            notify(f"❌ Riepilogo settimanale: {e}")
         for entry in sorted(os.listdir(config.WATCH_DIR)):
             folder = os.path.join(config.WATCH_DIR, entry)
             if entry.startswith(("_", ".")) or not os.path.isdir(folder):
