@@ -222,11 +222,36 @@ def _hashtag(name: str) -> str:
     return f"#{tag}" if tag and not tag.isdigit() else ""
 
 
+_PLATFORMS = {
+    "youtube.com": "YouTube", "youtu.be": "YouTube", "instagram.com": "Instagram",
+    "linkedin.com": "LinkedIn", "tiktok.com": "TikTok", "facebook.com": "Facebook", "fb.watch": "Facebook",
+    "x.com": "X", "twitter.com": "X", "t.me": "Telegram", "twitch.tv": "Twitch", "vimeo.com": "Vimeo",
+    "rumble.com": "Rumble", "reddit.com": "Reddit", "threads.net": "Threads", "spotify.com": "Spotify",
+    "soundcloud.com": "SoundCloud", "dailymotion.com": "Dailymotion", "odysee.com": "Odysee",
+}
+
+
+def _platform_of(url: str) -> str:
+    host = articles.site_of(url).lower()
+    for domain, name in _PLATFORMS.items():
+        if host == domain or host.endswith("." + domain):
+            return name
+    # Anything else is the author's own site: its domain is what to follow.
+    return host
+
+
+def _platform_emoji(platform: str) -> str:
+    emoji_id, _, fallback = (storage.get_kv(DB_PATH, f"emoji:{platform}") or "").partition(" ")
+    return f'<tg-emoji emoji-id="{emoji_id}">{html.escape(fallback)}</tg-emoji> ' if emoji_id else ""
+
+
 def _source_html(source_url: str, source_name: str = "") -> str:
     if not source_url:
         return ""
     tag = _hashtag(source_name)
-    link = f'<a href="{html.escape(source_url, quote=True)}">Fonte</a>'
+    name = _platform_of(source_url)
+    link = (f'Seguimi su {_platform_emoji(name)}'
+            f'<a href="{html.escape(source_url, quote=True)}">{html.escape(name, quote=False)}</a>')
     return f"{link} {tag}" if tag else link
 
 
@@ -269,8 +294,18 @@ def _topic_of(message: Any) -> Optional[int]:
     return getattr(message, "message_thread_id", None) if getattr(message, "is_topic_message", False) else None
 
 
+_TG_EMOJI = re.compile(r"<tg-emoji[^>]*>(.*?)</tg-emoji>", re.S)
+_plain_emoji_chats: set[str] = set()
+
+
+def _without_custom_emoji(data: dict) -> dict:
+    return {k: _TG_EMOJI.sub(r"\1", v) if isinstance(v, str) else v for k, v in data.items()}
+
+
 def _tg_post(method: str, data: dict, files: Optional[dict] = None, *, timeout_s: int) -> dict:
     url = f"{TG_API_BASE}/{method}"
+    if str(data.get("chat_id")) in _plain_emoji_chats:
+        data = _without_custom_emoji(data)
     target = getattr(_topic, "value", None)
     if target and str(data.get("chat_id")) == str(target[0]):
         data = {**data, "message_thread_id": str(target[1])}
@@ -280,6 +315,16 @@ def _tg_post(method: str, data: dict, files: Optional[dict] = None, *, timeout_s
     except Exception:
         raise RuntimeError(f"Telegram API non-JSON response (HTTP {resp.status_code}): {resp.text[:300]}")
     if not payload.get("ok"):
+        plain = _without_custom_emoji(data)
+        if plain != data:
+            # The owner's Premium unlocks custom emoji only in private chats and groups, not channels:
+            # this chat gets the plain emoji from now on.
+            print(f"Custom emoji refused in {data.get('chat_id')}: {payload.get('description')}")
+            _plain_emoji_chats.add(str(data.get("chat_id")))
+            for part in (files or {}).values():
+                if hasattr(part[1], "seek"):
+                    part[1].seek(0)
+            return _tg_post(method, plain, files, timeout_s=timeout_s)
         raise RuntimeError(
             f"Telegram API error {payload.get('error_code')}: {payload.get('description')}"
         )
@@ -2146,6 +2191,47 @@ def handle_errors(message: types.Message) -> None:
         for kind, url, err, chat_type, count, last in rows
     ]
     bot.send_message(message.chat.id, "\n\n".join(lines)[:TEXT_LIMIT], parse_mode="HTML", disable_web_page_preview=True)
+
+
+def _utf16_slice(text: str, start: int, end: Optional[int] = None) -> str:
+    # Telegram entity offsets count UTF-16 code units, and an emoji is two of them.
+    raw = text.encode("utf-16-le")
+    return raw[start * 2:None if end is None else end * 2].decode("utf-16-le")
+
+
+@bot.message_handler(commands=["emoji"])
+def handle_emoji(message: types.Message) -> None:
+    if message.from_user.id != ADMIN_USER_ID:
+        return
+    text = message.text or ""
+    names = {n.lower(): n for n in _PLATFORMS.values()}
+    pairs, last = [], len(text.split(maxsplit=1)[0].encode("utf-16-le")) // 2
+    for ent in message.entities or []:
+        if ent.type != "custom_emoji":
+            continue
+        words = re.findall(r"\w+", _utf16_slice(text, last, ent.offset))
+        last = ent.offset + ent.length
+        if not words or words[-1].lower() not in names:
+            bot.reply_to(message, f"Prima di ogni emoji scrivi la piattaforma ({', '.join(sorted(names.values()))}).")
+            return
+        pairs.append((names[words[-1].lower()], ent.custom_emoji_id, _utf16_slice(text, ent.offset, last)))
+    if not pairs:
+        # "/emoji YouTube" without an emoji removes it.
+        for word in re.findall(r"\w+", _utf16_slice(text, last)):
+            if word.lower() in names:
+                storage.set_kv(DB_PATH, f"emoji:{names[word.lower()]}", "")
+                pairs.append(None)
+    for pair in pairs:
+        if pair:
+            storage.set_kv(DB_PATH, f"emoji:{pair[0]}", f"{pair[1]} {pair[2]}")
+    current = [f"{_platform_emoji(n)}{n}" for n in sorted(names.values()) if _platform_emoji(n)]
+    reply = (("Emoji delle piattaforme:\n" + "\n".join(current)) if current else
+             "Nessuna emoji impostata.\nUso: /emoji YouTube 🎬 Instagram 📸 (con le emoji premium); /emoji YouTube la toglie.")
+    try:
+        bot.send_message(message.chat.id, reply, parse_mode="HTML")
+    except Exception as e:
+        plain = _TG_EMOJI.sub(r"\1", reply)
+        bot.send_message(message.chat.id, f"{plain}\n\n⚠️ Telegram rifiuta le emoji premium: {e}", parse_mode="HTML")
 
 
 @bot.message_handler(commands=["report"])
