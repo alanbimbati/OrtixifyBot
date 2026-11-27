@@ -72,8 +72,9 @@ def _send_farewell(stage: int) -> None:
             bot.send_message(chat_id, _farewell_text(is_last, private))
             sent += 1
         except Exception as e:
-            # Blocked the bot or left the group: retrying would fail the same way.
-            print(f"Farewell {stage} to {chat_id} failed: {e}")
+            # Blocked the bot or left the group: retrying would fail the same way, and the summary counts it.
+            if getattr(e, "error_code", None) != 403:
+                print(f"Farewell {stage} to {chat_id} failed: {e}")
             failed += 1
         with _db() as conn:
             conn.execute("INSERT OR IGNORE INTO farewell_sent VALUES (?, ?)", (stage, chat_id))

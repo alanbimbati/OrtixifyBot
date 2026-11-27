@@ -70,7 +70,9 @@ class _YdlLogger:
         print(f"WARNING: {msg}", file=sys.stderr)
 
     def error(self, msg: str) -> None:
-        if not _UPCOMING_RE.search(msg):
+        # A post without video falls back to its article (_without_video): not worth an ERROR line.
+        no_video = "[youtube" not in msg.lower() and (_NO_VIDEO_RE.search(msg) or "Unable to extract" in msg)
+        if not _UPCOMING_RE.search(msg) and not no_video:
             print(msg, file=sys.stderr)
 
 
